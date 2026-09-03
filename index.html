@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E0F12">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Lanzarote — Navigatore offline</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.js"></script>
+<style>
+  :root{--basalto:#0E0F12;--basalto-2:#16181D;--basalto-3:#1F232A;
+    --calce:#EDE9E0;--calce-dim:#A7A296;--ocra:#C87B2C;--oceano:#2FA6A0;--vino:#7A2E33;--allarme:#D9534F;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{background:var(--basalto);color:var(--calce);font-family:system-ui,-apple-system,Roboto,sans-serif;
+    display:flex;flex-direction:column;height:100dvh;overflow:hidden;
+    padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);}
+  header{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--basalto-2);
+    border-bottom:1px solid var(--basalto-3);z-index:5;}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--allarme);box-shadow:0 0 8px var(--allarme);flex:none;}
+  .dot.live{background:var(--oceano);box-shadow:0 0 8px var(--oceano);}
+  header h1{font-size:12px;margin:0;letter-spacing:.5px;font-weight:600;flex:1;text-transform:uppercase;}
+  .stato{font-size:11px;color:var(--calce-dim);text-align:right;font-variant-numeric:tabular-nums;}
+  #map{flex:1;min-height:0;background:#1a1c20;}
+
+  /* HUD guida: tachimetro + cartello limite */
+  .drive{position:absolute;left:12px;bottom:76px;z-index:5;display:flex;gap:10px;align-items:flex-end;}
+  .tacho{width:96px;height:96px;border-radius:50%;background:rgba(22,24,29,.94);border:1px solid var(--basalto-3);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;backdrop-filter:blur(6px);}
+  .tacho .v{font-size:34px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;}
+  .tacho .u{font-size:10px;color:var(--calce-dim);letter-spacing:1px;}
+  .tacho.over .v{color:var(--allarme);}
+  .limite{width:70px;height:70px;border-radius:50%;background:#fff;border:7px solid var(--allarme);
+    display:none;align-items:center;justify-content:center;}
+  .limite.on{display:flex;}
+  .limite span{color:#111;font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;}
+
+  /* Avviso autovelox */
+  .cam{position:absolute;left:12px;right:12px;top:12px;z-index:6;background:var(--allarme);color:#fff;
+    border-radius:12px;padding:10px 14px;font-size:13px;font-weight:700;display:none;align-items:center;gap:10px;}
+  .cam.on{display:flex;}
+  .cam .d{margin-left:auto;font-variant-numeric:tabular-nums;}
+
+  .banner{position:absolute;left:12px;right:12px;top:12px;z-index:7;background:var(--vino);color:var(--calce);
+    border-radius:12px;padding:10px 14px;font-size:12.5px;line-height:1.35;display:none;}
+  .banner.show{display:block;}
+  .me{width:16px;height:16px;border-radius:50%;background:var(--oceano);border:3px solid #04211f;box-shadow:0 0 0 2px var(--oceano);}
+
+  .toolbar{display:flex;gap:8px;padding:10px 12px;overflow-x:auto;background:var(--basalto-2);border-top:1px solid var(--basalto-3);}
+  .toolbar button,.toolbar label{flex:none;background:var(--basalto-3);color:var(--calce);border:none;border-radius:10px;
+    padding:9px 13px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+  .toolbar button.on{background:var(--oceano);color:#04211f;}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Lanzarote · offline</h1>
+  <span class="stato" id="stato">GPS spento</span>
+</header>
+
+<div id="map"></div>
+
+<div class="cam" id="cam">📸 Autovelox <span id="camName"></span><span class="d" id="camDist"></span></div>
+<div class="banner" id="banner"></div>
+
+<div class="drive">
+  <div class="tacho" id="tacho"><div class="v" id="spd">0</div><div class="u">KM/H</div></div>
+  <div class="limite" id="limite"><span id="limVal">50</span></div>
+</div>
+
+<div class="toolbar">
+  <button id="btnGps">📍 GPS</button>
+  <button id="btnFollow" class="on">🎯 Segui</button>
+  <button id="btnDemo">▶︎ Demo</button>
+  <label>📂 Limiti GPX/JSON<input id="fileLim" type="file" accept=".geojson,.json" hidden></label>
+  <label>📸 Autovelox<input id="fileCam" type="file" accept=".geojson,.json" hidden></label>
+</div>
+
+<script>
+"use strict";
+/* ===== Dati locali (offline). SEGNAPOSTO: sostituisci con estrazione OSM — vedi README ===== */
+let LIMITS={type:"FeatureCollection",features:[
+ {type:"Feature",properties:{maxspeed:90,ref:"LZ-2",source:"ESEMPIO"},geometry:{type:"LineString",
+   coordinates:[[-13.548,28.962],[-13.665,28.921],[-13.829,28.864]]}},
+ {type:"Feature",properties:{maxspeed:90,ref:"LZ-1",source:"ESEMPIO"},geometry:{type:"LineString",
+   coordinates:[[-13.548,28.962],[-13.47,29.079],[-13.498,29.144],[-13.481,29.219]]}},
+ {type:"Feature",properties:{maxspeed:50,ref:"Arrecife urbano",source:"ESEMPIO"},geometry:{type:"LineString",
+   coordinates:[[-13.548,28.962],[-13.535,28.968]]}},
+ {type:"Feature",properties:{maxspeed:60,ref:"LZ-30 La Geria",source:"ESEMPIO"},geometry:{type:"LineString",
+   coordinates:[[-13.613,29.0],[-13.683,28.985],[-13.754,29.0]]}},
+]};
+let CAMERAS={type:"FeatureCollection",features:[
+ {type:"Feature",properties:{name:"ESEMPIO – non reale",maxspeed:90},
+  geometry:{type:"Point",coordinates:[-13.62,28.945]}},
+]};
+
+/* ===== Geo utils ===== */
+const rad=d=>d*Math.PI/180, R=6371000;
+function haversine(a,b){const dLat=rad(b.lat-a.lat),dLon=rad(b.lon-a.lon);
+  const s=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));}
+const LAT0=28.98, MX=111320*Math.cos(rad(LAT0)), MY=110540;
+const toXY=(lon,lat)=>({x:lon*MX,y:lat*MY});
+function distSeg(p,a,b){ // metri, punto-segmento in piano locale
+  const P=toXY(p.lon,p.lat),A=toXY(a[0],a[1]),B=toXY(b[0],b[1]);
+  const dx=B.x-A.x,dy=B.y-A.y,L2=dx*dx+dy*dy;
+  let t=L2?((P.x-A.x)*dx+(P.y-A.y)*dy)/L2:0; t=Math.max(0,Math.min(1,t));
+  const cx=A.x+t*dx,cy=A.y+t*dy;
+  return Math.hypot(P.x-cx,P.y-cy);
+}
+function matchLimit(p,fc,tol=120){ // limite del segmento più vicino entro tol metri
+  let best=null,bd=tol;
+  for(const f of fc.features){
+    if(f.geometry.type!=="LineString")continue;
+    const c=f.geometry.coordinates;
+    for(let i=0;i<c.length-1;i++){
+      const d=distSeg(p,c[i],c[i+1]);
+      if(d<bd){bd=d;best=f.properties.maxspeed;}
+    }
+  }
+  return best;
+}
+function nearestCamera(p,fc,range=800){
+  let best=null,bd=range;
+  for(const f of fc.features){
+    if(f.geometry.type!=="Point")continue;
+    const c=f.geometry.coordinates, d=haversine(p,{lat:c[1],lon:c[0]});
+    if(d<bd){bd=d;best={f,d};}
+  }
+  return best;
+}
+
+/* ===== Mappa (MapLibre, base raster OSM; offline vero = PMTiles, vedi README) ===== */
+const map=new maplibregl.Map({container:"map",center:[-13.63,29.03],zoom:10,
+  style:{version:8,sources:{osm:{type:"raster",tiles:["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+    tileSize:256,attribution:"© OpenStreetMap"}},layers:[{id:"osm",type:"raster",source:"osm"}]}});
+
+let meEl=document.createElement("div");meEl.className="me";
+let meMarker=new maplibregl.Marker({element:meEl});
+const camMarkers=[];
+map.on("load",()=>{drawCameras();});
+
+function drawCameras(){
+  camMarkers.forEach(m=>m.remove());camMarkers.length=0;
+  CAMERAS.features.forEach(f=>{
+    if(f.geometry.type!=="Point")return;
+    const el=document.createElement("div");el.textContent="📸";el.style.fontSize="20px";
+    camMarkers.push(new maplibregl.Marker({element:el}).setLngLat(f.geometry.coordinates).addTo(map));
+  });
+}
+
+/* ===== Stato guida ===== */
+let pos=null,follow=true,watchId=null,camLast={};
+function update(p,speedMs){
+  pos={lat:p.lat,lon:p.lon};
+  meMarker.setLngLat([p.lon,p.lat]).addTo(map);
+  if(follow)map.easeTo({center:[p.lon,p.lat],zoom:Math.max(map.getZoom(),14),duration:600});
+
+  // tachimetro
+  const kmh=speedMs!=null&&speedMs>=0?Math.round(speedMs*3.6):null;
+  document.getElementById("spd").textContent=kmh!=null?kmh:"–";
+
+  // limite dal map-matching
+  const lim=matchLimit(pos,LIMITS);
+  const limBox=document.getElementById("limite"),tacho=document.getElementById("tacho");
+  if(lim!=null){document.getElementById("limVal").textContent=lim;limBox.classList.add("on");
+    tacho.classList.toggle("over",kmh!=null&&kmh>lim+3);}
+  else{limBox.classList.remove("on");tacho.classList.remove("over");}
+
+  // autovelox
+  const near=nearestCamera(pos,CAMERAS);
+  const camBox=document.getElementById("cam");
+  if(near){
+    const id=near.f.geometry.coordinates.join(","), prev=camLast[id];
+    const avvicina=prev==null||near.d<prev; camLast[id]=near.d;
+    if(avvicina){
+      camBox.classList.add("on");
+      document.getElementById("camName").textContent=near.f.properties.name||"";
+      document.getElementById("camDist").textContent=Math.round(near.d)+" m";
+      if((prev>200&&near.d<=200)||(prev>500&&near.d<=500)){try{navigator.vibrate&&navigator.vibrate(150);}catch(e){}}
+    }else camBox.classList.remove("on");
+  }else camBox.classList.remove("on");
+}
+
+/* ===== GPS ===== */
+function startGPS(){
+  stopDemo();
+  if(!("geolocation" in navigator)){banner("Questo browser non espone il GPS.");return;}
+  document.getElementById("btnGps").classList.add("on");
+  document.getElementById("stato").textContent="GPS in avvio…";
+  if(watchId!=null)navigator.geolocation.clearWatch(watchId);
+  watchId=navigator.geolocation.watchPosition(
+    p=>{hideBanner();document.getElementById("dot").className="dot live";
+      document.getElementById("stato").textContent="GPS live · ±"+Math.round(p.coords.accuracy)+" m";
+      update({lat:p.coords.latitude,lon:p.coords.longitude},p.coords.speed);},
+    e=>{document.getElementById("btnGps").classList.remove("on");
+      document.getElementById("stato").textContent="GPS: errore";
+      banner("GPS non disponibile ("+e.message+"). Aprila come pagina https (non da file), oppure usa ▶︎ Demo.");},
+    {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
+}
+
+/* ===== Demo: percorre LZ-2 verso l'autovelox di esempio ===== */
+let demoT=null;
+function startDemo(){
+  if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+  document.getElementById("btnGps").classList.remove("on");
+  document.getElementById("btnDemo").classList.add("on");
+  document.getElementById("dot").className="dot live";
+  document.getElementById("stato").textContent="Demo";
+  const path=[[-13.548,28.962],[-13.60,28.951],[-13.62,28.945],[-13.665,28.921],[-13.75,28.89],[-13.829,28.864]];
+  let seg=0,t=0;
+  clearInterval(demoT);
+  demoT=setInterval(()=>{
+    const a=path[seg],b=path[seg+1];
+    const lon=a[0]+(b[0]-a[0])*t, lat=a[1]+(b[1]-a[1])*t;
+    update({lat,lon}, 25); // ~90 km/h
+    t+=0.05; if(t>=1){t=0;seg++;if(seg>=path.length-1)seg=0;}
+  },200);
+}
+function stopDemo(){clearInterval(demoT);demoT=null;document.getElementById("btnDemo").classList.remove("on");}
+
+/* ===== Caricamento dati reali ===== */
+function readJSON(file,cb){const r=new FileReader();r.onload=()=>{try{cb(JSON.parse(r.result));}catch(e){banner("File non valido: "+e.message);}};r.readAsText(file);}
+document.getElementById("fileLim").addEventListener("change",e=>{const f=e.target.files[0];if(f)readJSON(f,j=>{LIMITS=j;banner("Limiti caricati: "+(j.features?.length||0)+" tratti.");setTimeout(hideBanner,2000);});});
+document.getElementById("fileCam").addEventListener("change",e=>{const f=e.target.files[0];if(f)readJSON(f,j=>{CAMERAS=j;drawCameras();banner("Autovelox caricati: "+(j.features?.length||0)+" punti.");setTimeout(hideBanner,2000);});});
+
+/* ===== Fetch opzionale dei dati se serviti via http (deploy) ===== */
+["data/speed_limits.geojson","data/speed_cameras.geojson"].forEach((u,i)=>{
+  fetch(u).then(r=>r.ok?r.json():null).then(j=>{if(!j)return; if(i===0)LIMITS=j; else{CAMERAS=j;drawCameras();}}).catch(()=>{});
+});
+
+/* ===== UI ===== */
+function banner(t){const b=document.getElementById("banner");b.textContent=t;b.classList.add("show");}
+function hideBanner(){document.getElementById("banner").classList.remove("show");}
+document.getElementById("btnGps").onclick=startGPS;
+document.getElementById("btnDemo").onclick=()=>{demoT?stopDemo():startDemo();};
+document.getElementById("btnFollow").onclick=()=>{follow=!follow;document.getElementById("btnFollow").classList.toggle("on",follow);};
+
+/* ===== Service worker (attivo solo servito via https/localhost) ===== */
+if("serviceWorker" in navigator){navigator.serviceWorker.register("sw.js").catch(()=>{});}
+
+banner("Dati limiti/autovelox = SEGNAPOSTO d'esempio. Sostituiscili coi reali (README). Prova ▶︎ Demo per vedere tachimetro, limite e avviso autovelox in azione.");
+</script>
+</body>
+</html>
